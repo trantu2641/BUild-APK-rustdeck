@@ -1,0 +1,7 @@
+Patch info
+==========
+Purpose: build a custom RustDesk Android APK whose InputService prefers privileged Android `input` commands when Magisk grants root to the RustDesk package.
+Source commit pinned in workflow: 53996e3c404ea5083df0775057e4149e49102084
+Target file: flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
+No screen capture or MediaProjection code is changed.
+No compiled APK is included in this ZIP; the workflow builds it and exposes it as an Actions artifact.
