@@ -1,5 +1,11 @@
 
 #!/usr/bin/env python3
+"""RustDesk Android Root Input V3.
+
+Routes mouse, touch gestures and supported key input through Android's
+root input command without filtering by active application/window package.
+Falls back to RustDesk's original Accessibility path if root is unavailable.
+"""
 
 from pathlib import Path
 import sys
@@ -8,9 +14,9 @@ RELATIVE = Path(
     "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt"
 )
 
-MARKER = "// ROOT_INPUT_PATCH_V2"
+MARKER = "// ROOT_INPUT_PATCH_V3"
 
-HELPERS = r'''    // ROOT_INPUT_PATCH_V2
+HELPERS = r'''    // ROOT_INPUT_PATCH_V3
 
     private val rootInputExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "rustdesk-root-input").apply { isDaemon = true }
@@ -19,37 +25,16 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
     @Volatile
     private var rootInputReady = false
 
-    @Volatile
-    private var activeWindowPackageName: String? = null
-
-    private val rootInputPackages = setOf(
-        "android",
-        "com.android.systemui",
-        "com.android.settings",
-        "com.android.permissioncontroller",
-        "com.google.android.permissioncontroller",
-        "com.android.packageinstaller",
-        "com.google.android.packageinstaller",
-        "com.android.providers.settings",
-        "com.miui.securitycenter",
-        "com.miui.permissioncontroller",
-        "com.miui.guardprovider"
-    )
-
     private var rootPointerDown = false
     private var rootGestureMoved = false
     private var rootGestureStartX = 0
     private var rootGestureStartY = 0
     private var rootGestureStartAt = 0L
 
-    private fun isAllowedRootInputPackage(packageName: String?): Boolean {
-        if (packageName.isNullOrBlank()) return false
-
-        return rootInputPackages.contains(packageName) ||
-            packageName.endsWith(".permissioncontroller") ||
-            packageName.endsWith(".packageinstaller")
-    }
-
+    /**
+     * Check that Magisk/su actually grants UID 0.
+     * No application-name or window-name filtering is performed.
+     */
     private fun probeRootInput() {
         rootInputExecutor.execute {
             var process: Process? = null
@@ -59,7 +44,7 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
                     .redirectErrorStream(true)
                     .start()
 
-                if (!process.waitFor(15, TimeUnit.SECONDS)) {
+                if (!process.waitFor(30, TimeUnit.SECONDS)) {
                     process.destroyForcibly()
                     rootInputReady = false
                     Log.e(logTag, "Root input check timed out")
@@ -89,91 +74,21 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
         }
     }
 
-    /*
-     * Find the package belonging to the currently active/focused windows.
-     * Do not rely solely on AccessibilityEvent.packageName: that value can
-     * describe the event source rather than the window receiving the touch.
-     */
-    private fun currentWindowPackages(): Set<String> {
-        val result = linkedSetOf<String>()
-
-        try {
-            val root = rootInActiveWindow
-            val packageName = root?.packageName?.toString()
-
-            if (!packageName.isNullOrBlank()) {
-                result.add(packageName)
-            }
-        } catch (e: Exception) {
-            Log.w(logTag, "Cannot read active accessibility root: ${e.message}")
-        }
-
-        try {
-            for (window in windows) {
-                if (!window.isActive && !window.isFocused) {
-                    continue
-                }
-
-                try {
-                    val packageName = window.root?.packageName?.toString()
-
-                    if (!packageName.isNullOrBlank()) {
-                        result.add(packageName)
-                    }
-                } catch (e: Exception) {
-                    Log.d(logTag, "Cannot read window root: ${e.message}")
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(logTag, "Cannot enumerate accessibility windows: ${e.message}")
-        }
-
-        return result
-    }
-
-    private fun shouldUseRootForCurrentWindow(): Boolean {
-        if (!rootInputReady) {
-            return false
-        }
-
-        val candidates = currentWindowPackages()
-
-        val allowedPackage = candidates.firstOrNull {
-            isAllowedRootInputPackage(it)
-        }
-
-        if (allowedPackage != null) {
-            activeWindowPackageName = allowedPackage
-            Log.d(
-                logTag,
-                "Root input selected for system window: $allowedPackage"
-            )
-            return true
-        }
-
-        activeWindowPackageName = candidates.firstOrNull()
-
-        Log.d(
-            logTag,
-            "Using normal RustDesk input; current windows=$candidates"
-        )
-
-        return false
-    }
-
     private fun shellQuote(value: String): String {
         return "'" + value.replace("'", "'\\''") + "'"
     }
 
+    /**
+     * Send an Android input command as root.
+     * The queue preserves command order across down/up and key events.
+     */
     private fun enqueueRootInput(vararg args: String) {
         if (!rootInputReady || args.isEmpty()) {
-            Log.w(logTag, "Root input ignored: root is unavailable")
+            Log.w(logTag, "Root input skipped: root is unavailable")
             return
         }
 
-        val command = args.joinToString(" ") {
-            shellQuote(it)
-        }
+        val command = args.joinToString(" ") { shellQuote(it) }
 
         rootInputExecutor.execute {
             var process: Process? = null
@@ -183,9 +98,9 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
                     .redirectErrorStream(true)
                     .start()
 
-                if (!process.waitFor(3, TimeUnit.SECONDS)) {
+                if (!process.waitFor(5, TimeUnit.SECONDS)) {
                     process.destroyForcibly()
-                    Log.e(logTag, "Root input timed out: ${args.firstOrNull()}")
+                    Log.e(logTag, "Root command timed out: ${args.firstOrNull()}")
                     rootInputReady = false
                     return@execute
                 }
@@ -198,11 +113,14 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
                 if (process.exitValue() != 0) {
                     Log.e(
                         logTag,
-                        "Root input failed; exit=${process.exitValue()}, output=$output"
+                        "Root command failed; exit=${process.exitValue()}, output=$output"
                     )
                     rootInputReady = false
                 } else {
-                    Log.d(logTag, "Root input succeeded: ${args.firstOrNull()}")
+                    Log.d(
+                        logTag,
+                        "Root command succeeded: ${args.firstOrNull()}"
+                    )
                 }
             } catch (e: Exception) {
                 Log.e(logTag, "Root input exception: ${e.message}")
@@ -234,7 +152,9 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
     }
 
     private fun finishRootGesture(x: Int, y: Int) {
-        if (!rootPointerDown) return
+        if (!rootPointerDown) {
+            return
+        }
 
         val elapsed = (
             System.currentTimeMillis() - rootGestureStartAt
@@ -250,7 +170,7 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
                 rootGestureStartY.toString(),
                 x.toString(),
                 y.toString(),
-                elapsed.coerceIn(80L, 2000L).toString()
+                elapsed.coerceIn(80L, 3000L).toString()
             )
         } else if (elapsed >= longPressDuration) {
             enqueueRootInput(
@@ -272,40 +192,62 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
         }
     }
 
+    /**
+     * Root input is global: no package allowlist and no window-name checks.
+     */
     private fun handleRootMouseInput(
         mask: Int,
         rawX: Int,
         rawY: Int
     ): Boolean {
-        if (!shouldUseRootForCurrentWindow()) {
+        if (!rootInputReady) {
             return false
         }
 
-        mouseX = max(0, rawX) * SCREEN_INFO.scale
-        mouseY = max(0, rawY) * SCREEN_INFO.scale
+        val x = max(0, rawX) * SCREEN_INFO.scale
+        val y = max(0, rawY) * SCREEN_INFO.scale
 
         when (mask) {
-            0, LEFT_MOVE -> moveRootGesture(mouseX, mouseY)
+            0, LEFT_MOVE -> {
+                mouseX = x
+                mouseY = y
+                moveRootGesture(mouseX, mouseY)
+            }
 
-            LEFT_DOWN -> beginRootGesture(mouseX, mouseY)
+            LEFT_DOWN -> {
+                mouseX = x
+                mouseY = y
+                beginRootGesture(mouseX, mouseY)
+            }
 
-            LEFT_UP -> finishRootGesture(mouseX, mouseY)
+            LEFT_UP -> {
+                mouseX = x
+                mouseY = y
+                finishRootGesture(mouseX, mouseY)
+            }
 
-            RIGHT_UP -> enqueueRootInput(
-                "/system/bin/input",
-                "swipe",
-                mouseX.toString(),
-                mouseY.toString(),
-                mouseX.toString(),
-                mouseY.toString(),
-                longPressDuration.toString()
-            )
+            RIGHT_UP -> {
+                mouseX = x
+                mouseY = y
 
-            BACK_UP -> enqueueRootInput(
-                "/system/bin/input",
-                "keyevent",
-                "4"
-            )
+                enqueueRootInput(
+                    "/system/bin/input",
+                    "swipe",
+                    x.toString(),
+                    y.toString(),
+                    x.toString(),
+                    y.toString(),
+                    longPressDuration.toString()
+                )
+            }
+
+            BACK_UP -> {
+                enqueueRootInput(
+                    "/system/bin/input",
+                    "keyevent",
+                    "4"
+                )
+            }
 
             WHEEL_BUTTON_DOWN -> {
                 timer.purge()
@@ -338,28 +280,34 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
             }
 
             WHEEL_DOWN -> {
-                if (mouseY >= WHEEL_STEP) {
+                mouseX = x
+                mouseY = y
+
+                if (y >= WHEEL_STEP) {
                     enqueueRootInput(
                         "/system/bin/input",
                         "swipe",
-                        mouseX.toString(),
-                        mouseY.toString(),
-                        mouseX.toString(),
-                        (mouseY - WHEEL_STEP).toString(),
+                        x.toString(),
+                        y.toString(),
+                        x.toString(),
+                        (y - WHEEL_STEP).toString(),
                         WHEEL_DURATION.toString()
                     )
                 }
             }
 
             WHEEL_UP -> {
-                if (mouseY >= WHEEL_STEP) {
+                mouseX = x
+                mouseY = y
+
+                if (y >= WHEEL_STEP) {
                     enqueueRootInput(
                         "/system/bin/input",
                         "swipe",
-                        mouseX.toString(),
-                        mouseY.toString(),
-                        mouseX.toString(),
-                        (mouseY + WHEEL_STEP).toString(),
+                        x.toString(),
+                        y.toString(),
+                        x.toString(),
+                        (y + WHEEL_STEP).toString(),
                         WHEEL_DURATION.toString()
                     )
                 }
@@ -371,12 +319,15 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
         return true
     }
 
+    /**
+     * RustDesk touchpad pan events are converted to root tap/swipe commands.
+     */
     private fun handleRootTouchInput(
         mask: Int,
         rawX: Int,
         rawY: Int
     ): Boolean {
-        if (!shouldUseRootForCurrentWindow()) {
+        if (!rootInputReady) {
             return false
         }
 
@@ -384,6 +335,7 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
             TOUCH_PAN_START -> {
                 mouseX = max(0, rawX) * SCREEN_INFO.scale
                 mouseY = max(0, rawY) * SCREEN_INFO.scale
+
                 beginRootGesture(mouseX, mouseY)
             }
 
@@ -392,6 +344,7 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
                     0,
                     mouseX - rawX * SCREEN_INFO.scale
                 )
+
                 mouseY = max(
                     0,
                     mouseY - rawY * SCREEN_INFO.scale
@@ -402,6 +355,7 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
 
             TOUCH_PAN_END -> {
                 finishRootGesture(mouseX, mouseY)
+
                 mouseX = max(0, rawX) * SCREEN_INFO.scale
                 mouseY = max(0, rawY) * SCREEN_INFO.scale
             }
@@ -412,10 +366,16 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
         return true
     }
 
+    /**
+     * Android's input text command supports ASCII text and %s for spaces.
+     * For unsupported text, leave the original RustDesk keyboard path intact.
+     */
     private fun rootTextArgument(text: String): String? {
         if (
             text.any {
-                it.code < 0x20 || it.code > 0x7e || it == '%'
+                it.code < 0x20 ||
+                it.code > 0x7e ||
+                it == '%'
             }
         ) {
             return null
@@ -429,7 +389,7 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
         androidEvent: KeyEventAndroid?,
         text: String?
     ): Boolean {
-        if (!shouldUseRootForCurrentWindow()) {
+        if (!rootInputReady) {
             return false
         }
 
@@ -441,6 +401,7 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
                 "text",
                 argument
             )
+
             return true
         }
 
@@ -448,14 +409,14 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
 
         if (
             event != null &&
+            event.keyCode != KeyEventAndroid.KEYCODE_UNKNOWN &&
             (
                 keyEvent.getPress() ||
                 (
                     keyEvent.getDown() &&
                     event.action == KeyEventAndroid.ACTION_DOWN
                 )
-            ) &&
-            event.keyCode != KeyEventAndroid.KEYCODE_UNKNOWN
+            )
         ) {
             enqueueRootInput(
                 "/system/bin/input",
@@ -469,16 +430,21 @@ HELPERS = r'''    // ROOT_INPUT_PATCH_V2
 '''
 
 
-def replace_once(text: str, old: str, new: str, name: str) -> str:
-    count = text.count(old)
+def replace_once(
+    source: str,
+    old: str,
+    new: str,
+    label: str,
+) -> str:
+    count = source.count(old)
 
     if count != 1:
         raise SystemExit(
-            f"Patch stopped safely: expected one anchor for {name}, "
+            f"Patch stopped safely: expected one anchor for {label}, "
             f"found {count}. No patched file was written."
         )
 
-    return text.replace(old, new, 1)
+    return source.replace(old, new, 1)
 
 
 def main() -> int:
@@ -499,7 +465,7 @@ def main() -> int:
     source = target.read_text(encoding="utf-8")
 
     if MARKER in source:
-        print("Root input V2 patch is already applied.")
+        print("Root Input V3 is already applied.")
         return 0
 
     source = replace_once(
@@ -528,7 +494,7 @@ def main() -> int:
         "    fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n"
         "        if (handleRootMouseInput(mask, _x, _y)) return\n"
         "        val x = max(0, _x)\n",
-        "mouse input routing",
+        "mouse input route",
     )
 
     source = replace_once(
@@ -538,7 +504,7 @@ def main() -> int:
         "    fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n"
         "        if (handleRootTouchInput(mask, _x, _y)) return\n"
         "        when (mask) {\n",
-        "touch input routing",
+        "touch input route",
     )
 
     key_anchor = '''        ke?.let { event ->
@@ -569,87 +535,26 @@ def main() -> int:
         source,
         key_anchor,
         key_replacement,
-        "keyboard routing",
+        "keyboard input route",
     )
 
     source = replace_once(
         source,
-        '''    override fun onAccessibilityEvent(event: AccessibilityEvent) {
-    }
+        '''        ctx = this
+        notifyInputState()
 ''',
-        '''    override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        val eventPackage = event.packageName?.toString()
-
-        if (
-            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-        ) {
-            val packages = currentWindowPackages()
-
-            val selected = packages.firstOrNull {
-                isAllowedRootInputPackage(it)
-            } ?: packages.firstOrNull() ?: eventPackage
-
-            if (!selected.isNullOrBlank()) {
-                activeWindowPackageName = selected
-            }
-
-            Log.d(
-                logTag,
-                "Window event=${event.eventType}; " +
-                    "eventPackage=$eventPackage; " +
-                    "currentPackages=$packages; " +
-                    "selected=$activeWindowPackageName"
-            )
-        }
-    }
-''',
-        "window event handler",
-    )
-
-    source = replace_once(
-        source,
-        '''        val info = AccessibilityServiceInfo()
-        if (Build.VERSION.SDK_INT >= 33) {
-''',
-        '''        val info = AccessibilityServiceInfo()
-
-        // The service must continue receiving window changes after setServiceInfo.
-        info.eventTypes =
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED or
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-        info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-        info.notificationTimeout = 50
-
-        if (Build.VERSION.SDK_INT >= 33) {
-''',
-        "accessibility event configuration",
-    )
-
-    source = replace_once(
-        source,
-        '''        setServiceInfo(info)
-        fakeEditTextForTextStateCalculation = EditText(this)
-''',
-        '''        setServiceInfo(info)
-
-        activeWindowPackageName = try {
-            rootInActiveWindow?.packageName?.toString()
-        } catch (_: Exception) {
-            null
-        }
-
+        '''        ctx = this
         probeRootInput()
-
-        fakeEditTextForTextStateCalculation = EditText(this)
+        notifyInputState()
 ''',
-        "root input initialization",
+        "root check on service connection",
     )
 
     target.write_text(source, encoding="utf-8")
 
     print(f"Patched: {target}")
-    print("Applied Root Input V2 with live system-window detection.")
+    print("Root Input V3 installed.")
+    print("Root input no longer filters by application or window package.")
     return 0
 
 
