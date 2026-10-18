@@ -1,3 +1,4 @@
+
 name: Build RustDesk Root Input APK
 
 on:
@@ -12,8 +13,10 @@ concurrency:
 
 jobs:
   build-android-arm64:
+    name: Build Android ARM64 APK
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
+
     env:
       RUST_VERSION: "1.75"
       FLUTTER_VERSION: "3.24.5"
@@ -23,13 +26,13 @@ jobs:
       RUSTDESK_REF: "53996e3c404ea5083df0775057e4149e49102084"
 
     steps:
-      - name: Check out patch kit
+      - name: Checkout patch kit
         uses: actions/checkout@v4
         with:
           path: patch-kit
           persist-credentials: false
 
-      - name: Check out RustDesk source
+      - name: Checkout RustDesk source
         uses: actions/checkout@v4
         with:
           repository: rustdesk/rustdesk
@@ -39,17 +42,43 @@ jobs:
           persist-credentials: false
 
       - name: Apply root input patch
-        run: python3 patch-kit/apply_root_input_patch.py rustdesk-src
+        run: |
+          set -e
+          python3 patch-kit/apply_root_input_patch.py rustdesk-src
 
       - name: Install system dependencies
         run: |
+          set -e
           sudo apt-get update
-          sudo apt-get install -y \
-            clang cmake curl gcc git g++ libclang-dev libgtk-3-dev llvm-dev \
-            nasm ninja-build pkg-config wget openjdk-17-jdk-headless \
-            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev \
-            libxfixes-dev libasound2-dev libpulse-dev libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev
+
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            curl \
+            file \
+            g++ \
+            gcc \
+            git \
+            libclang-dev \
+            libssl-dev \
+            llvm-dev \
+            make \
+            nasm \
+            ninja-build \
+            openjdk-17-jdk-headless \
+            perl \
+            pkg-config \
+            python3 \
+            python3-pip \
+            unzip \
+            wget \
+            zip \
+            yasm \
+            ca-certificates \
+            autoconf \
+            automake \
+            libtool
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
@@ -58,31 +87,43 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
-      - name: Install Rust
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: aarch64-linux-android
           components: rustfmt
 
-      - name: Install Flutter Rust bridge generator
+      - name: Generate Flutter Rust bridge
         working-directory: rustdesk-src
         run: |
-          cargo install flutter_rust_bridge_codegen --version "${FLUTTER_RUST_BRIDGE_VERSION}" --features uuid --locked
-          sed -i 's/uni_links_desktop/#uni_links_desktop/g' flutter/pubspec.yaml
-          pushd flutter
+          set -e
+
+          cargo install flutter_rust_bridge_codegen \
+            --version "${FLUTTER_RUST_BRIDGE_VERSION}" \
+            --features uuid \
+            --locked
+
+          sed -i \
+            's/uni_links_desktop/#uni_links_desktop/g' \
+            flutter/pubspec.yaml
+
+          cd flutter
           flutter pub get
-          popd
-          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart
+          cd ..
+
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart
 
       - name: Install Android NDK
-        uses: nttld/setup-ndk@v1
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779
         id: setup-ndk
         with:
           ndk-version: r28c
           add-to-path: true
 
-      - name: Set up vcpkg
+      - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
@@ -92,7 +133,9 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: bash flutter/build_android_deps.sh arm64-v8a
+        run: |
+          set -e
+          bash flutter/build_android_deps.sh arm64-v8a
 
       - name: Build RustDesk native library
         working-directory: rustdesk-src
@@ -100,26 +143,63 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          rustup target add aarch64-linux-android
-          cargo install cargo-ndk --version "${CARGO_NDK_VERSION}" --locked
-          bash ./flutter/ndk_arm64.sh
-          mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
-          cp ./target/aarch64-linux-android/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
-          cp "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" ./flutter/android/app/src/main/jniLibs/arm64-v8a/
+          set -e
 
-      - name: Build APK
+          rustup target add aarch64-linux-android
+
+          cargo install cargo-ndk \
+            --version "${CARGO_NDK_VERSION}" \
+            --locked
+
+          bash ./flutter/ndk_arm64.sh
+
+          mkdir -p \
+            ./flutter/android/app/src/main/jniLibs/arm64-v8a
+
+          cp \
+            ./target/aarch64-linux-android/release/liblibrustdesk.so \
+            ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+
+          cp \
+            "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+            ./flutter/android/app/src/main/jniLibs/arm64-v8a/libc++_shared.so
+
+      - name: Build RustDesk APK
         working-directory: rustdesk-src
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
         run: |
-          sed -i 's/signingConfig.release/signingConfig.debug/g' ./flutter/android/app/build.gradle
-          pushd flutter
+          set -e
+
+          sed -i \
+            's/signingConfig.release/signingConfig.debug/g' \
+            ./flutter/android/app/build.gradle
+
+          cd flutter
+
           flutter pub get
-          flutter build apk --release --target-platform android-arm64 --split-per-abi
-          popd
-          cp ./flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk ./rustdesk-rootinput-arm64.apk
+
+          flutter build apk \
+            --release \
+            --target-platform android-arm64 \
+            --split-per-abi
+
+          cd ..
+
+          APK_PATH="flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
+
+          if [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: APK was not produced at $APK_PATH"
+            find flutter/build -type f -name '*.apk' -print || true
+            exit 1
+          fi
+
+          cp "$APK_PATH" rustdesk-rootinput-arm64.apk
+
+          echo "APK build completed:"
+          ls -lh rustdesk-rootinput-arm64.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
