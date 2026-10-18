@@ -1,3 +1,4 @@
+
 name: Build RustDesk Root Input APK
 
 on:
@@ -86,23 +87,25 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
-      - name: Repair Flutter Gradle dependency repositories
+      - name: Repair Flutter Gradle Maven repositories
         shell: bash
         run: |
           set -euo pipefail
 
           FLUTTER_ROOT="$(cd "$(dirname "$(command -v flutter)")/.." && pwd)"
-          BUILD_FILE="${FLUTTER_ROOT}/packages/flutter_tools/gradle/build.gradle"
+          SETTINGS_FILE="${FLUTTER_ROOT}/packages/flutter_tools/gradle/settings.gradle.kts"
 
-          if [ ! -f "${BUILD_FILE}" ]; then
-            echo "ERROR: Flutter Gradle plugin build.gradle was not found:"
-            echo "${BUILD_FILE}"
+          echo "Flutter root: ${FLUTTER_ROOT}"
+          echo "Gradle settings: ${SETTINGS_FILE}"
+
+          if [ ! -f "${SETTINGS_FILE}" ]; then
+            echo "ERROR: Flutter Gradle settings file not found."
             find "${FLUTTER_ROOT}/packages/flutter_tools/gradle" \
-              -maxdepth 2 -type f -name 'build.gradle*' -print || true
+              -maxdepth 2 -type f -print || true
             exit 1
           fi
 
-          python3 - "${BUILD_FILE}" <<'PY'
+          python3 - "${SETTINGS_FILE}" <<'PY'
           from pathlib import Path
           import re
           import sys
@@ -110,54 +113,37 @@ jobs:
           path = Path(sys.argv[1])
           content = path.read_text(encoding="utf-8")
 
-          mirror_marker = "https://maven-central.storage-download.googleapis.com/maven2/"
+          mirrors = [
+              '        maven { url = uri("https://repo1.maven.org/maven2/") }',
+              '        maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }',
+          ]
 
-          if mirror_marker not in content:
+          marker = "https://maven-central.storage-download.googleapis.com/maven2/"
+
+          if marker not in content:
               pattern = re.compile(r"(?m)^([ \t]*)mavenCentral\(\)[ \t]*$")
 
-              def add_mirrors(match):
+              def insert_mirrors(match):
                   indent = match.group(1)
-                  return (
-                      match.group(0)
-                      + "\n"
-                      + indent
-                      + "maven { url 'https://repo1.maven.org/maven2/' }\n"
-                      + indent
-                      + "maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }"
-                  )
+                  lines = [
+                      match.group(0),
+                      indent + 'maven { url = uri("https://repo1.maven.org/maven2/") }',
+                      indent + 'maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }',
+                  ]
+                  return "\n".join(lines)
 
-              content, count = pattern.subn(add_mirrors, content)
+              content, count = pattern.subn(insert_mirrors, content, count=1)
 
-              if count == 0:
+              if count != 1:
                   raise SystemExit(
-                      "ERROR: Could not locate mavenCentral() in Flutter Gradle plugin."
+                      "ERROR: Could not find mavenCentral() in settings.gradle.kts."
                   )
 
-          substitution_marker = "Use available compatible JavaWriter patch release."
+              path.write_text(content, encoding="utf-8")
 
-          if substitution_marker not in content:
-              content += """
-
-          // Temporary compatibility workaround for unavailable JavaWriter 2.5.0.
-          configurations.configureEach {
-              resolutionStrategy.eachDependency { details ->
-                  if (details.requested.group == 'com.squareup' &&
-                      details.requested.name == 'javawriter' &&
-                      details.requested.version == '2.5.0') {
-                      details.useVersion '2.5.1'
-                      details.because 'Use available compatible JavaWriter patch release.'
-                  }
-              }
-          }
-          """
-
-          path.write_text(content, encoding="utf-8")
-          print("Patched Flutter Gradle plugin:", path)
+          print("Updated Maven repositories in:", path)
+          print(path.read_text(encoding="utf-8"))
           PY
-
-          echo "Added Maven Central fallback repositories."
-          grep -n -E 'repo1.maven.org|maven-central.storage-download|JavaWriter patch' \
-            "${BUILD_FILE}" || true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -204,8 +190,8 @@ jobs:
           SYSROOT="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
           if [ ! -f "${SYSROOT}/usr/include/stdint.h" ]; then
-            echo "ERROR: Android NDK stdint.h not found:"
-            echo "${SYSROOT}/usr/include/stdint.h"
+            echo "ERROR: Android NDK stdint.h not found."
+            echo "Expected: ${SYSROOT}/usr/include/stdint.h"
             exit 1
           fi
 
@@ -303,7 +289,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Use the debug signing configuration for the locally installable APK.
           sed -i -E \
             's/signingConfig[[:space:]]+signingConfigs\.release/signingConfig signingConfigs.debug/g' \
             ./flutter/android/app/build.gradle
