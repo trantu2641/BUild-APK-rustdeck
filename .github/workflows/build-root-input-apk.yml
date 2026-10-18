@@ -1,3 +1,4 @@
+
 name: Build RustDesk Root Input APK
 
 on:
@@ -42,12 +43,12 @@ jobs:
 
       - name: Apply root input patch
         run: |
-          set -e
+          set -euo pipefail
           python3 patch-kit/apply_root_input_patch.py rustdesk-src
 
       - name: Install system dependencies
         run: |
-          set -e
+          set -euo pipefail
           sudo apt-get update
 
           sudo apt-get install -y --no-install-recommends \
@@ -96,7 +97,7 @@ jobs:
       - name: Generate Flutter Rust bridge
         working-directory: rustdesk-src
         run: |
-          set -e
+          set -euo pipefail
 
           cargo install flutter_rust_bridge_codegen \
             --version "${FLUTTER_RUST_BRIDGE_VERSION}" \
@@ -138,7 +139,6 @@ jobs:
 
           echo "Android NDK: ${ANDROID_NDK_HOME}"
           echo "Android sysroot: ${SYSROOT}"
-          echo "NDK stdint.h exists."
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
@@ -159,12 +159,9 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-
-          # Fix bindgen using Ubuntu headers instead of Android NDK headers.
           BINDGEN_EXTRA_CLANG_ARGS: >-
             --target=aarch64-linux-android21
             --sysroot=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
-
         run: |
           set -euo pipefail
 
@@ -176,22 +173,19 @@ jobs:
 
           bash ./flutter/ndk_arm64.sh
 
-          mkdir -p \
-            ./flutter/android/app/src/main/jniLibs/arm64-v8a
+          mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
 
           LIB_PATH="./target/aarch64-linux-android/release/liblibrustdesk.so"
           CXX_LIB="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
 
           if [ ! -f "${LIB_PATH}" ]; then
-            echo "ERROR: RustDesk native library was not produced:"
-            echo "${LIB_PATH}"
+            echo "ERROR: RustDesk native library was not produced."
             find target -type f -name 'liblibrustdesk.so' -print || true
             exit 1
           fi
 
           if [ ! -f "${CXX_LIB}" ]; then
-            echo "ERROR: Android libc++_shared.so was not found:"
-            echo "${CXX_LIB}"
+            echo "ERROR: Android libc++_shared.so was not found."
             find "${ANDROID_NDK_HOME}" -type f -name 'libc++_shared.so' -print || true
             exit 1
           fi
@@ -202,7 +196,34 @@ jobs:
           cp "${CXX_LIB}" \
             ./flutter/android/app/src/main/jniLibs/arm64-v8a/libc++_shared.so
 
-          echo "RustDesk native library built successfully."
+      - name: Configure Gradle memory
+        working-directory: rustdesk-src
+        run: |
+          set -euo pipefail
+
+          GRADLE_PROPERTIES="./flutter/android/gradle.properties"
+
+          if [ ! -f "${GRADLE_PROPERTIES}" ]; then
+            touch "${GRADLE_PROPERTIES}"
+          fi
+
+          # Remove conflicting or duplicate Gradle memory/worker settings.
+          sed -i -E \
+            '/^[[:space:]]*org\.gradle\.jvmargs[[:space:]]*=/d;
+             /^[[:space:]]*org\.gradle\.parallel[[:space:]]*=/d;
+             /^[[:space:]]*org\.gradle\.workers\.max[[:space:]]*=/d' \
+            "${GRADLE_PROPERTIES}"
+
+          cat >> "${GRADLE_PROPERTIES}" <<'EOF'
+
+          # Prevent R8 from running out of Java heap during release builds.
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -XX:+HeapDumpOnOutOfMemoryError
+          org.gradle.parallel=false
+          org.gradle.workers.max=2
+          EOF
+
+          echo "Gradle memory configuration:"
+          cat "${GRADLE_PROPERTIES}"
 
       - name: Build RustDesk APK
         working-directory: rustdesk-src
