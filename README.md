@@ -18,7 +18,7 @@ The root path is best-effort. It is selected using the active accessibility wind
 2. Open **Actions → Build RustDesk Root Input APK → Run workflow**.
 3. Wait for the ARM64 build to finish. Download artifact `rustdesk-rootinput-arm64`.
 
-The workflow checks out the pinned RustDesk source, applies the patch, builds the Android ARM64 APK, and uploads it as an artifact. The first build can take a long time because it compiles Rust and vcpkg dependencies.
+The workflow checks out the pinned RustDesk source, applies the patch, builds the Android ARM64 APK, and uploads it as an artifact. The build workflow does not need `yq`; it has been removed from the Ubuntu package list to avoid `E: Unable to locate package yq` on runners without that package index enabled. The first build can take a long time because it compiles Rust and vcpkg dependencies.
 
 ## Install notes
 
